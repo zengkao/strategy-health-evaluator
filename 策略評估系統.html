@@ -6,6 +6,7 @@
 <title>策略健康度評估系統</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@3.1.0/dist/chartjs-plugin-annotation.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <style>
 :root {
   --bg: #0f1117;
@@ -106,9 +107,9 @@ tbody tr:hover { background:#1f2235; }
 <!-- ===== PAGE 1: Single Strategy ===== -->
 <div class="page active" id="page0">
   <div class="upload-zone" id="upload1" onclick="document.getElementById('file1').click()">
-    <h3>拖曳或點擊上傳 CSV 檔案</h3>
-    <div class="hint">支援 Big5 / UTF-8 編碼，格式：商品名稱,商品代碼,序號,進場時間,進場方向,進場價格,出場時間,出場方向,出場價格,持有區間,交易數量,獲利金額,報酬率,累計獲利金額,累計報酬率,進場訊息,出場訊息</div>
-    <input type="file" id="file1" accept=".csv">
+    <h3>拖曳或點擊上傳回測報告</h3>
+    <div class="hint">支援三大平台：XQ (CSV) / MultiCharts (XLSX) / TradingView (XLSX)</div>
+    <input type="file" id="file1" accept=".csv,.xlsx,.xls">
   </div>
   <div id="result1"></div>
 </div>
@@ -116,9 +117,9 @@ tbody tr:hover { background:#1f2235; }
 <!-- ===== PAGE 2: Portfolio ===== -->
 <div class="page" id="page1">
   <div class="upload-zone" id="upload2" onclick="document.getElementById('file2').click()">
-    <h3>拖曳或點擊上傳 CSV 檔案（最多 10 個）</h3>
-    <div class="hint">每個 CSV 為一個策略，系統將進行組合評估與比較分析</div>
-    <input type="file" id="file2" accept=".csv" multiple>
+    <h3>拖曳或點擊上傳回測報告（最多 10 個）</h3>
+    <div class="hint">每個檔案為一個策略（CSV / XLSX），系統將進行組合評估與比較分析</div>
+    <input type="file" id="file2" accept=".csv,.xlsx,.xls" multiple>
   </div>
   <div class="file-chips" id="chips2"></div>
   <div id="result2"></div>
@@ -152,11 +153,11 @@ function setupDrop(zoneId, inputId, handler) {
   input.addEventListener('change', ev => { handler(ev.target.files); });
 }
 
-setupDrop('upload1','file1', files => { if(files[0]) parseCSV(files[0], data => renderSingle(data, files[0].name)); });
+setupDrop('upload1','file1', files => { if(files[0]) parseFile(files[0], data => renderSingle(data, files[0].name)); });
 setupDrop('upload2','file2', files => {
   for(let f of files) {
     if(portfolioData.length >= 10) break;
-    parseCSV(f, data => { portfolioData.push({name:f.name.replace(/\.csv$/i,''), trades:data, metrics:calcMetrics(data)}); renderPortfolio(); });
+    parseFile(f, data => { portfolioData.push({name:f.name.replace(/\.(csv|xlsx?)$/i,''), trades:data, metrics:calcMetrics(data)}); renderPortfolio(); });
   }
 });
 
@@ -233,6 +234,94 @@ function parseCSVLine(line) {
   }
   result.push(current.trim());
   return result;
+}
+
+// ============================================================
+// XLSX PARSING (MultiCharts / TradingView)
+// ============================================================
+function parseFile(file, cb) {
+  const ext = file.name.split('.').pop().toLowerCase();
+  if(ext === 'csv') { parseCSV(file, cb); return; }
+  const reader = new FileReader();
+  reader.onload = function(e) {
+    const data = new Uint8Array(e.target.result);
+    const wb = XLSX.read(data, {type:'array', cellDates:true});
+    if(wb.SheetNames.includes('交易明細')) { cb(parseMCWorkbook(wb)); }
+    else if(wb.SheetNames.includes('交易清單')) { cb(parseTVWorkbook(wb)); }
+    else { alert('無法識別 XLSX 格式，請確認為 MultiCharts 或 TradingView 回測報告'); }
+  };
+  reader.readAsArrayBuffer(file);
+}
+
+function xlsxDateStr(dateVal, timeVal) {
+  if(!dateVal) return '';
+  const d = dateVal instanceof Date ? dateVal : new Date(dateVal);
+  const y=d.getFullYear(), m=String(d.getMonth()+1).padStart(2,'0'), day=String(d.getDate()).padStart(2,'0');
+  let h='00', min='00';
+  if(timeVal instanceof Date) { h=String(timeVal.getHours()).padStart(2,'0'); min=String(timeVal.getMinutes()).padStart(2,'0'); }
+  else if(typeof timeVal==='number') { const t=Math.round(timeVal*24*60); h=String(Math.floor(t/60)%24).padStart(2,'0'); min=String(t%60).padStart(2,'0'); }
+  return `${y}/${m}/${day} ${h}:${min}`;
+}
+
+function xlsxDateTimeStr(val) {
+  if(!val) return '';
+  const d = val instanceof Date ? val : new Date(val);
+  return `${d.getFullYear()}/${String(d.getMonth()+1).padStart(2,'0')}/${String(d.getDate()).padStart(2,'0')} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
+}
+
+function parseMCWorkbook(wb) {
+  const ws = wb.Sheets['交易明細'];
+  const rows = XLSX.utils.sheet_to_json(ws, {header:1, defval:null});
+  let headerIdx = -1;
+  for(let i=0; i<Math.min(10,rows.length); i++) { if(rows[i]&&rows[i][0]==='交易編號') { headerIdx=i; break; } }
+  if(headerIdx<0) return [];
+  const trades = [];
+  let i = headerIdx+1;
+  while(i < rows.length-1) {
+    const er=rows[i], xr=rows[i+1];
+    if(!er||er[0]==null) { i++; continue; }
+    if(!xr) break;
+    const isLong = String(er[3]||'').includes('Long');
+    trades.push({
+      product:er[1]||'', code:er[1]||'', seq:er[0],
+      entryTime:xlsxDateStr(er[5],er[6]), entryDir:isLong?'買進':'賣出', entryPrice:er[7]||0,
+      exitTime:xlsxDateStr(xr[5],xr[6]), exitDir:isLong?'賣出':'買進', exitPrice:xr[7]||0,
+      holdBars:0, qty:er[8]||1,
+      profit:er[9]||0, returnRate:(er[10]||0)*100,
+      cumProfit:er[11]||0, cumReturn:er[12]||0,
+      entrySignal:er[4]||'', exitSignal:xr[4]||''
+    });
+    i+=2;
+  }
+  return trades;
+}
+
+function parseTVWorkbook(wb) {
+  let product = '';
+  if(wb.Sheets['屬性']) {
+    const props = XLSX.utils.sheet_to_json(wb.Sheets['屬性'], {header:1, defval:null});
+    for(const row of props) { if(row[0]==='商品') { product=row[1]||''; break; } }
+  }
+  const ws = wb.Sheets['交易清單'];
+  const rows = XLSX.utils.sheet_to_json(ws, {header:1, defval:null});
+  const trades = [];
+  for(let i=1; i<rows.length; i+=2) {
+    const r1=rows[i], r2=rows[i+1];
+    if(!r1||!r2) break;
+    let er,xr;
+    if(String(r1[1]||'').includes('進場')) { er=r1; xr=r2; } else { er=r2; xr=r1; }
+    const isLong = String(er[1]||'').includes('多頭');
+    trades.push({
+      product, code:product, seq:r1[0],
+      entryTime:xlsxDateTimeStr(er[2]), entryDir:isLong?'買進':'賣出', entryPrice:er[4]||0,
+      exitTime:xlsxDateTimeStr(xr[2]), exitDir:isLong?'賣出':'買進', exitPrice:xr[4]||0,
+      holdBars:0, qty:er[5]||1,
+      profit:r1[7]||0, returnRate:r1[8]||0,
+      cumProfit:r1[13]||0, cumReturn:r1[14]||0,
+      entrySignal:String(er[3]||''), exitSignal:String(xr[3]||'')
+    });
+  }
+  return trades;
 }
 
 // ============================================================
@@ -431,7 +520,7 @@ function renderSingle(trades, fileName) {
       <div class="health-details">
         <div style="display:flex;align-items:center;gap:12px;margin-bottom:8px">
           <span class="grade grade-${grade}">等級 ${grade}</span>
-          <span style="color:var(--text2);font-size:13px">${fileName.replace(/\.csv$/i,'')}</span>
+          <span style="color:var(--text2);font-size:13px">${fileName.replace(/\.(csv|xlsx?)$/i,'')}</span>
         </div>
         <div class="health-bar-visual">
           <div class="health-bar-fill" style="width:${score}%;background:${gc}"></div>
