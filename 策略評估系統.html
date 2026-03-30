@@ -658,6 +658,9 @@ function renderPortfolio() {
   const excludedCount = allTrades.length - limitedTrades.length;
   document.getElementById('posLimitInfo').textContent = maxPos > 0 ? `排除 ${excludedCount} 筆 / 原 ${allTrades.length} 筆 → 剩 ${limitedTrades.length} 筆` : '';
 
+  // Overlap stats
+  const overlapStats = calcOverlapStats(allTrades, maxPos);
+
   if(limitedTrades.length === 0) {
     container.innerHTML = '<p style="color:var(--red);padding:20px">部位上限過低，所有交易皆被排除。請調高上限值。</p>';
     return;
@@ -721,6 +724,16 @@ function renderPortfolio() {
         <div style="color:var(--text2);font-size:12px;margin-top:6px">組合總交易 ${combined.n} 筆${maxPos > 0 ? ' (原 '+allTrades.length+' 筆，排除 '+excludedCount+' 筆)' : ''} | 組合總淨利 ${fmt(combined.totalProfit)} | ${combined.startDate} ~ ${combined.endDate}</div>
       </div>
     </div>
+
+    ${overlapStats ? `
+    <div class="section-title">策略重複度分析</div>
+    <div class="metrics-grid" style="grid-template-columns:repeat(4,1fr)">
+      ${mc('不重複比例', pct(overlapStats.pctWithinLimit), overlapStats.pctWithinLimit >= 0.8 ? 'positive' : overlapStats.pctWithinLimit >= 0.5 ? 'neutral' : 'negative', '持倉 ≤ 部位上限的時間比例')}
+      ${mc('時間 ≥ 部位上限', pct(overlapStats.pctOverLimit), overlapStats.pctOverLimit <= 0.2 ? 'positive' : overlapStats.pctOverLimit <= 0.5 ? 'neutral' : 'negative', '持倉達到或超過上限的時間')}
+      ${mc('時間 ≥ 2 倍上限', pct(overlapStats.pctOver2x), overlapStats.pctOver2x <= 0.1 ? 'positive' : overlapStats.pctOver2x <= 0.3 ? 'neutral' : 'negative', '持倉達到 2 倍上限的時間')}
+      ${mc('最大同時持倉', overlapStats.maxConcurrent + ' 口', overlapStats.maxConcurrent <= maxPos ? 'positive' : 'negative', '部位上限 ' + maxPos + ' 口')}
+    </div>
+    ` : ''}
 
     <div class="section-title">策略比較總表</div>
     <div class="tbl-wrap compare-table">
@@ -808,6 +821,59 @@ function calcCorrelation(m1, m2, months) {
   }
   const denom = Math.sqrt(std1*std2);
   return denom === 0 ? 0 : cov / denom;
+}
+
+// ============================================================
+// OVERLAP ANALYSIS (策略重複度)
+// ============================================================
+function calcOverlapStats(allTrades, maxPos) {
+  if(!allTrades.length || maxPos <= 0) return null;
+
+  // Build timeline events: +1 at entry, -1 at exit
+  const events = [];
+  for(const trade of allTrades) {
+    events.push({ time: trade.entryTime, delta: 1 });
+    events.push({ time: trade.exitTime, delta: -1 });
+  }
+  // Sort: by time, exits (-1) before entries (+1) at same timestamp
+  events.sort((a,b) => {
+    const cmp = a.time.localeCompare(b.time);
+    if(cmp !== 0) return cmp;
+    return a.delta - b.delta;
+  });
+
+  function parseT(s) {
+    const p = s.split(/[\/\s:]/);
+    return new Date(+p[0], p[1]-1, +p[2], +(p[3]||0), +(p[4]||0));
+  }
+
+  const t0 = parseT(events[0].time);
+  const tEnd = parseT(events[events.length - 1].time);
+  const totalMs = tEnd - t0;
+  if(totalMs <= 0) return null;
+
+  let pos = 0, lastT = t0;
+  let msOver = 0, msOver2x = 0;
+  let maxConcurrent = 0;
+
+  for(const ev of events) {
+    const t = parseT(ev.time);
+    const dt = t - lastT;
+    if(dt > 0) {
+      if(pos >= maxPos)     msOver   += dt;
+      if(pos >= maxPos * 2) msOver2x += dt;
+    }
+    pos += ev.delta;
+    if(pos > maxConcurrent) maxConcurrent = pos;
+    lastT = t;
+  }
+
+  return {
+    pctWithinLimit: 1 - msOver / totalMs,   // % 時間 <= 部位上限（不重複）
+    pctOverLimit:  msOver / totalMs,          // % 時間 >= 部位上限
+    pctOver2x:     msOver2x / totalMs,        // % 時間 >= 2 倍部位上限
+    maxConcurrent
+  };
 }
 
 // ============================================================
