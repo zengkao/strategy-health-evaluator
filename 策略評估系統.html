@@ -70,6 +70,14 @@ tbody tr:hover { background:#1f2235; }
 .chip .dot { width:10px; height:10px; border-radius:50%; }
 .chip .remove { cursor:pointer; color:var(--red); font-weight:700; margin-left:4px; }
 .compare-table { max-height:600px; overflow:auto; }
+.pos-limit-panel { background:var(--card); border:1px solid var(--border); border-radius:10px; padding:14px 20px; margin-bottom:16px; display:flex; align-items:center; gap:14px; flex-wrap:wrap; }
+.pos-limit-panel label { font-size:14px; font-weight:600; color:var(--text); white-space:nowrap; }
+.pos-limit-panel input[type=number] { width:80px; padding:8px 12px; background:var(--bg); border:1px solid var(--border); border-radius:8px; color:var(--green); font-size:16px; font-weight:700; text-align:center; outline:none; -moz-appearance:textfield; }
+.pos-limit-panel input[type=number]::-webkit-inner-spin-button,.pos-limit-panel input[type=number]::-webkit-outer-spin-button { -webkit-appearance:none; margin:0; }
+.pos-limit-panel input[type=number]:focus { border-color:var(--green); }
+.pos-limit-panel .btn { padding:8px 18px; background:var(--green); color:var(--bg); border:none; border-radius:8px; font-size:13px; font-weight:600; cursor:pointer; transition:.2s; }
+.pos-limit-panel .btn:hover { background:#00b894; }
+.pos-limit-info { font-size:13px; color:var(--orange); font-weight:500; }
 
 /* Scrollbar */
 ::-webkit-scrollbar { width:6px; height:6px; }
@@ -122,6 +130,14 @@ tbody tr:hover { background:#1f2235; }
     <input type="file" id="file2" accept=".csv,.xlsx,.xls" multiple>
   </div>
   <div class="file-chips" id="chips2"></div>
+  <div class="pos-limit-panel" id="posLimitPanel" style="display:none">
+    <label>部位上限</label>
+    <input type="number" id="posLimitInput" min="0" max="100" value="0" onchange="renderPortfolio()" onkeydown="if(event.key==='Enter')renderPortfolio()">
+    <span style="font-size:13px;color:var(--text2)">口</span>
+    <button class="btn" onclick="renderPortfolio()">套用</button>
+    <span style="font-size:12px;color:var(--text2)">同時間最大持倉口數（0 = 不限制）</span>
+    <span class="pos-limit-info" id="posLimitInfo"></span>
+  </div>
   <div id="result2"></div>
 </div>
 
@@ -624,7 +640,8 @@ function renderPortfolio() {
     `<div class="chip"><span class="dot" style="background:${COLORS[i%10]}"></span>${d.name}<span class="remove" onclick="removeStrategy(${i})">×</span></div>`
   ).join('');
 
-  if(portfolioData.length === 0) { document.getElementById('result2').innerHTML = ''; return; }
+  document.getElementById('posLimitPanel').style.display = portfolioData.length > 0 ? 'flex' : 'none';
+  if(portfolioData.length === 0) { document.getElementById('result2').innerHTML = ''; document.getElementById('posLimitInfo').textContent = ''; return; }
 
   const container = document.getElementById('result2');
 
@@ -634,7 +651,19 @@ function renderPortfolio() {
     for(const t of d.trades) allTrades.push({...t, strategy: d.name});
   }
   allTrades.sort((a,b) => a.entryTime.localeCompare(b.entryTime));
-  const combined = calcMetrics(allTrades);
+
+  // Apply position limit
+  const maxPos = parseInt(document.getElementById('posLimitInput').value) || 0;
+  const limitedTrades = maxPos > 0 ? applyPositionLimit(allTrades, maxPos) : allTrades;
+  const excludedCount = allTrades.length - limitedTrades.length;
+  document.getElementById('posLimitInfo').textContent = maxPos > 0 ? `排除 ${excludedCount} 筆 / 原 ${allTrades.length} 筆 → 剩 ${limitedTrades.length} 筆` : '';
+
+  if(limitedTrades.length === 0) {
+    container.innerHTML = '<p style="color:var(--red);padding:20px">部位上限過低，所有交易皆被排除。請調高上限值。</p>';
+    return;
+  }
+
+  const combined = calcMetrics(limitedTrades);
   const combScore = calcHealthScore(combined);
   const combGrade = getGrade(combScore);
   const combGC = gradeColor(combGrade);
@@ -664,10 +693,10 @@ function renderPortfolio() {
     }
     return eq;
   });
-  // Combined time equity
+  // Combined time equity (uses position-limited trades)
   const combTimeEq = {};
   let combCum = 0;
-  for(const t of allTrades) {
+  for(const t of limitedTrades) {
     const day = t.exitTime.substring(0,10).replace(/\//g,'-');
     combCum += t.profit;
     combTimeEq[day] = combCum;
@@ -684,12 +713,12 @@ function renderPortfolio() {
       <div class="health-details">
         <div style="display:flex;align-items:center;gap:12px;margin-bottom:8px">
           <span class="grade grade-${combGrade}">組合等級 ${combGrade}</span>
-          <span style="color:var(--text2);font-size:13px">${portfolioData.length} 個策略組合</span>
+          <span style="color:var(--text2);font-size:13px">${portfolioData.length} 個策略組合${maxPos > 0 ? ' | 部位上限 ' + maxPos + ' 口' : ''}</span>
         </div>
         <div class="health-bar-visual">
           <div class="health-bar-fill" style="width:${combScore}%;background:${combGC}"></div>
         </div>
-        <div style="color:var(--text2);font-size:12px;margin-top:6px">組合總交易 ${combined.n} 筆 | 組合總淨利 ${fmt(combined.totalProfit)} | ${combined.startDate} ~ ${combined.endDate}</div>
+        <div style="color:var(--text2);font-size:12px;margin-top:6px">組合總交易 ${combined.n} 筆${maxPos > 0 ? ' (原 '+allTrades.length+' 筆，排除 '+excludedCount+' 筆)' : ''} | 組合總淨利 ${fmt(combined.totalProfit)} | ${combined.startDate} ~ ${combined.endDate}</div>
       </div>
     </div>
 
@@ -779,6 +808,32 @@ function calcCorrelation(m1, m2, months) {
   }
   const denom = Math.sqrt(std1*std2);
   return denom === 0 ? 0 : cov / denom;
+}
+
+// ============================================================
+// POSITION LIMIT
+// ============================================================
+function applyPositionLimit(allTrades, maxPos) {
+  const sorted = [...allTrades].sort((a,b) => a.entryTime.localeCompare(b.entryTime));
+  const accepted = [];
+  const openExits = []; // sorted exit times of currently open positions
+
+  for(const trade of sorted) {
+    // Remove positions that have closed (exitTime <= current entryTime)
+    while(openExits.length > 0 && openExits[0] <= trade.entryTime) {
+      openExits.shift();
+    }
+    if(openExits.length < maxPos) {
+      accepted.push(trade);
+      // Insert exitTime in sorted order
+      let idx = openExits.length;
+      for(let i = 0; i < openExits.length; i++) {
+        if(trade.exitTime <= openExits[i]) { idx = i; break; }
+      }
+      openExits.splice(idx, 0, trade.exitTime);
+    }
+  }
+  return accepted;
 }
 
 // ============================================================
