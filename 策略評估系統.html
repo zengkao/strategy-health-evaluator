@@ -102,6 +102,17 @@ tbody tr:hover { background:#1f2235; }
 
 @media(max-width:900px) { .chart-row { grid-template-columns:1fr; } .metrics-grid { grid-template-columns:repeat(2,1fr); } }
 @media(max-width:500px) { .metrics-grid { grid-template-columns:1fr; } }
+
+/* Distribution analysis page */
+.dist-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 20px; }
+.dist-card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 16px; }
+.dist-card.full { grid-column: 1 / -1; }
+.dist-card h4 { color: var(--text2); font-size: 13px; margin-bottom: 12px; font-weight: 500; }
+.dist-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+.dist-stat .dlabel { color: var(--text2); font-size: 11px; text-transform: uppercase; letter-spacing: .3px; }
+.dist-stat .dvalue { font-weight: 600; font-size: 15px; margin-top: 2px; }
+.env-box { background: #141627; border: 1px solid var(--border); border-radius: 8px; padding: 14px; margin-top: 14px; font-size: 13px; line-height: 1.8; }
+@media(max-width:900px) { .dist-grid { grid-template-columns: 1fr; } }
 </style>
 </head>
 <body>
@@ -110,6 +121,7 @@ tbody tr:hover { background:#1f2235; }
   <div class="nav-title">策略健康度評估系統</div>
   <div class="nav-item active" onclick="switchPage(0)">單一策略評估</div>
   <div class="nav-item" onclick="switchPage(1)">組合策略評估</div>
+  <div class="nav-item" onclick="switchPage(2)">交易分配分析</div>
 </div>
 
 <!-- ===== PAGE 1: Single Strategy ===== -->
@@ -141,6 +153,17 @@ tbody tr:hover { background:#1f2235; }
   <div id="result2"></div>
 </div>
 
+<!-- ===== PAGE 3: Distribution Analysis ===== -->
+<div class="page" id="page2">
+  <div class="upload-zone" id="upload3" onclick="document.getElementById('file3').click()">
+    <h3>拖曳或點擊上傳回測報告（最多 10 個）</h3>
+    <div class="hint">上傳策略回測報告，分析交易損益常態分配與適合的大環境</div>
+    <input type="file" id="file3" accept=".csv,.xlsx,.xls" multiple>
+  </div>
+  <div class="file-chips" id="chips3"></div>
+  <div id="result3"></div>
+</div>
+
 <script>
 // ============================================================
 // GLOBALS
@@ -148,6 +171,7 @@ tbody tr:hover { background:#1f2235; }
 const COLORS = ['#00d4aa','#4a90d9','#ff9f43','#a855f7','#ff4757','#22d3ee','#fbbf24','#f472b6','#34d399','#fb923c'];
 let charts = {};
 let portfolioData = []; // array of {name, trades, metrics}
+let distData = []; // array of {name, trades, metrics} for distribution page
 
 // ============================================================
 // NAV
@@ -174,6 +198,12 @@ setupDrop('upload2','file2', files => {
   for(let f of files) {
     if(portfolioData.length >= 10) break;
     parseFile(f, data => { portfolioData.push({name:f.name.replace(/\.(csv|xlsx?)$/i,''), trades:data, metrics:calcMetrics(data)}); renderPortfolio(); });
+  }
+});
+setupDrop('upload3','file3', files => {
+  for(let f of files) {
+    if(distData.length >= 10) break;
+    parseFile(f, data => { distData.push({name:f.name.replace(/\.(csv|xlsx?)$/i,''), trades:data, metrics:calcMetrics(data)}); renderDistribution(); });
   }
 });
 
@@ -1185,6 +1215,300 @@ function sqnLabel(v) {
   if(v >= 1) return '普通';
   if(v >= 0) return '偏弱';
   return '差';
+}
+
+// ============================================================
+// DISTRIBUTION ANALYSIS (PAGE 3)
+// ============================================================
+
+// ----- Statistical helpers -----
+function calcSkewness(arr) {
+  const n = arr.length, mean = arr.reduce((a,b)=>a+b,0)/n;
+  const m2 = arr.reduce((a,v)=>a+(v-mean)**2,0)/n;
+  const m3 = arr.reduce((a,v)=>a+(v-mean)**3,0)/n;
+  return m2 === 0 ? 0 : m3 / Math.pow(m2, 1.5);
+}
+
+function calcKurtosis(arr) {
+  const n = arr.length, mean = arr.reduce((a,b)=>a+b,0)/n;
+  const m2 = arr.reduce((a,v)=>a+(v-mean)**2,0)/n;
+  const m4 = arr.reduce((a,v)=>a+(v-mean)**4,0)/n;
+  return m2 === 0 ? 0 : m4 / (m2*m2) - 3;
+}
+
+function normalPDF(x, mean, std) {
+  return Math.exp(-0.5*((x-mean)/std)**2) / (std*Math.sqrt(2*Math.PI));
+}
+
+function gaussianKDE(data) {
+  const n = data.length, mean = data.reduce((a,b)=>a+b,0)/n;
+  const std = Math.sqrt(data.reduce((a,v)=>a+(v-mean)**2,0)/n);
+  const bw = std === 0 ? 1 : 1.06 * std * Math.pow(n, -0.2);
+  return function(x) {
+    let sum = 0;
+    for(const xi of data) sum += Math.exp(-0.5*((x-xi)/bw)**2);
+    return sum / (n * bw * Math.sqrt(2*Math.PI));
+  };
+}
+
+function normalQuantile(p) {
+  if(p <= 0) return -8; if(p >= 1) return 8; if(p === 0.5) return 0;
+  const a=[-3.969683028665376e1,2.209460984245205e2,-2.759285104469687e2,1.383577518672690e2,-3.066479806614716e1,2.506628277459239e0];
+  const b=[-5.447609879822406e1,1.615858368580409e2,-1.556989798598866e2,6.680131188771972e1,-1.328068155288572e1];
+  const c=[-7.784894002430293e-3,-3.223964580411365e-1,-2.400758277161838e0,-2.549732539343734e0,4.374664141464968e0,2.938163982698783e0];
+  const d=[7.784695709041462e-3,3.224671290700398e-1,2.445134137142996e0,3.754408661907416e0];
+  const pL=0.02425, pH=1-pL;
+  let q,r;
+  if(p<pL){q=Math.sqrt(-2*Math.log(p));return(((((c[0]*q+c[1])*q+c[2])*q+c[3])*q+c[4])*q+c[5])/((((d[0]*q+d[1])*q+d[2])*q+d[3])*q+1);}
+  if(p<=pH){q=p-0.5;r=q*q;return(((((a[0]*r+a[1])*r+a[2])*r+a[3])*r+a[4])*r+a[5])*q/(((((b[0]*r+b[1])*r+b[2])*r+b[3])*r+b[4])*r+1);}
+  q=Math.sqrt(-2*Math.log(1-p));return-(((((c[0]*q+c[1])*q+c[2])*q+c[3])*q+c[4])*q+c[5])/((((d[0]*q+d[1])*q+d[2])*q+d[3])*q+1);
+}
+
+function jarqueBera(arr) {
+  const n=arr.length, s=calcSkewness(arr), k=calcKurtosis(arr);
+  const jb=(n/6)*(s*s+k*k/4);
+  return {stat:jb, p:Math.min(Math.exp(-jb/2),1)};
+}
+
+function analyzeMarketEnv(m, trades) {
+  const lc=trades.filter(t=>t.entryDir==='買進').length, sc=trades.filter(t=>t.entryDir==='賣出').length, total=trades.length;
+  const lp=lc/total, sp=sc/total;
+  let dir; if(lp>0.8) dir='純多'; else if(sp>0.8) dir='純空'; else if(lp>0.55) dir='偏多'; else if(sp>0.55) dir='偏空'; else dir='多空雙向';
+  let style; const ab=m.avgHold;
+  if(ab<=5) style='極短線（Scalping）'; else if(ab<=15) style='短線當沖/短波段'; else if(ab<=50) style='波段交易'; else if(ab<=100) style='中長波段'; else style='長波段/趨勢跟蹤';
+  const envs=[], skew=calcSkewness(m.profits), kurt=calcKurtosis(m.profits);
+  if(dir==='純多'||dir==='偏多'){
+    if(style.includes('長波段')||style.includes('中長波段')){envs.push('✅ 多頭趨勢行情（牛市、指數上漲趨勢）');envs.push('⚠️ 不適合：空頭趨勢、大幅回調行情');}
+    else if(style.includes('波段')){envs.push('✅ 多頭波段行情（回調後反彈、區間突破向上）');envs.push(m.winRate<0.4?'✅ 低勝率高賺賠比 → 適合趨勢啟動階段':'✅ 震盪偏多格局也可運作');envs.push('⚠️ 不適合：持續下跌、空頭趨勢');}
+    else{envs.push('✅ 日內多頭動能行情');envs.push('✅ 開盤後快速拉升/慣性上漲行情');envs.push('⚠️ 不適合：開低走低、空頭日');}
+  } else if(dir==='純空'||dir==='偏空'){
+    if(style.includes('長波段')||style.includes('中長波段')){envs.push('✅ 空頭趨勢行情（熊市、指數持續下跌）');envs.push('⚠️ 不適合：多頭趨勢、V型反轉');}
+    else if(style.includes('波段')){envs.push('✅ 空頭波段行情（反彈後續跌、區間跌破）');envs.push('✅ 高檔震盪轉弱格局');envs.push('⚠️ 不適合：強勢多頭、軋空行情');}
+    else{envs.push('✅ 日內空頭動能行情（跳空下殺、破底）');envs.push('✅ 開盤後慣性下跌行情');envs.push('⚠️ 不適合：多頭強勢日、開高走高');}
+  } else {envs.push('✅ 震盪行情（雙向操作）');envs.push('✅ 無明確方向的區間盤整');}
+  if(skew>1) envs.push('📊 右偏分配：少數大賺彌補多數小虧（趨勢策略特徵）');
+  else if(skew<-1) envs.push('📊 左偏分配：多數小賺但偶有大虧（注意風控）');
+  else envs.push('📊 分配接近對稱：損益分配相對均衡');
+  if(kurt>3) envs.push('📊 高峰態（尖峰肥尾）：極端損益出現頻率較高');
+  else if(kurt<-0.5) envs.push('📊 低峰態（扁平分配）：損益分散較均勻');
+  return {dir,style,envs,lc,sc};
+}
+
+function dstat(label, value) { return `<div class="dist-stat"><div class="dlabel">${label}</div><div class="dvalue">${value}</div></div>`; }
+
+function removeDist(idx) { distData.splice(idx,1); renderDistribution(); }
+
+function sampleStd(arr) {
+  const n=arr.length, mean=arr.reduce((a,b)=>a+b,0)/n;
+  return Math.sqrt(arr.reduce((a,v)=>a+(v-mean)**2,0)/Math.max(n-1,1));
+}
+
+// ----- Render distribution page -----
+function renderDistribution() {
+  const chips=document.getElementById('chips3');
+  chips.innerHTML=distData.map((d,i)=>`<div class="chip"><span class="dot" style="background:${COLORS[i%10]}"></span>${d.name}<span class="remove" onclick="removeDist(${i})">×</span></div>`).join('');
+  if(!distData.length){document.getElementById('result3').innerHTML='';return;}
+  const container=document.getElementById('result3');
+  let html='';
+
+  distData.forEach((d,i)=>{
+    const m=d.metrics, profits=m.profits, n=profits.length;
+    const mean=m.avgProfit, std=sampleStd(profits);
+    const skew=calcSkewness(profits), kurt=calcKurtosis(profits);
+    const jb=jarqueBera(profits);
+    const env=analyzeMarketEnv(m,d.trades);
+    const sorted=[...profits].sort((a,b)=>a-b);
+    const median=sorted[Math.floor(n/2)];
+
+    html+=`
+    <div class="section-title" style="color:${COLORS[i%10]}">${d.name}</div>
+    <div class="dist-grid">
+      <div class="dist-card"><h4>交易損益分配（直方圖 + 常態 + KDE）</h4><canvas id="distAdv_${i}" height="180"></canvas></div>
+      <div class="dist-card">
+        <h4>分配統計</h4>
+        <div class="dist-stats">
+          ${dstat('交易次數',n)}
+          ${dstat('勝率',pct(m.winRate))}
+          ${dstat('均值',fmt(mean))}
+          ${dstat('中位數',fmt(median))}
+          ${dstat('標準差',fmt(std))}
+          ${dstat('偏態 Skew',skew.toFixed(3))}
+          ${dstat('峰態 Kurt',kurt.toFixed(3))}
+          ${dstat('最大獲利',fmt(m.maxProfit))}
+          ${dstat('最大虧損',fmt(m.maxLoss))}
+          ${dstat('獲利因子',m.profitFactor===Infinity?'∞':m.profitFactor.toFixed(2))}
+          ${dstat('賺賠比',m.payoffRatio===Infinity?'∞':m.payoffRatio.toFixed(2))}
+          ${dstat('常態檢定 (JB)',jb.p<0.05?'<span class="negative">非常態 p='+jb.p.toFixed(4)+'</span>':'<span class="positive">常態 p='+jb.p.toFixed(4)+'</span>')}
+        </div>
+        <div class="env-box">
+          <div style="font-weight:600;margin-bottom:6px;color:var(--text)">適合的大環境</div>
+          <div style="color:var(--text2);margin-bottom:8px">${env.dir} | ${env.style} | 平均持倉 ${m.avgHold.toFixed(1)} K棒 | 多:${env.lc} 空:${env.sc}</div>
+          ${env.envs.map(e=>`<div>${e}</div>`).join('')}
+        </div>
+      </div>
+    </div>`;
+  });
+
+  // KDE overlay comparison
+  if(distData.length>=2){
+    html+=`<div class="section-title">KDE 分配疊加比較</div><div class="dist-grid"><div class="dist-card full"><canvas id="kdeCompare" height="80"></canvas></div></div>`;
+  }
+
+  // Box plot comparison
+  html+=`<div class="section-title">損益箱型圖${distData.length>=2?' 比較':''}</div><div class="dist-grid"><div class="dist-card full"><canvas id="boxCompare" height="80"></canvas></div></div>`;
+
+  // QQ plots
+  html+=`<div class="section-title">Q-Q Plot（常態性檢驗）</div><div class="dist-grid">`;
+  distData.forEach((d,i)=>{html+=`<div class="dist-card"><h4 style="color:${COLORS[i%10]}">${d.name}</h4><canvas id="qqChart_${i}" height="150"></canvas></div>`;});
+  html+=`</div>`;
+
+  // Summary table
+  html+=`<div class="section-title">綜合比較表</div><div class="tbl-wrap"><table>
+    <thead><tr><th>策略</th><th>筆數</th><th>勝率</th><th>均值</th><th>標準差</th><th>偏態</th><th>峰態</th><th>PF</th><th>賺賠比</th><th>方向</th><th>風格</th><th>常態性</th></tr></thead><tbody>`;
+  distData.forEach((d,i)=>{
+    const m=d.metrics, p=m.profits, skew=calcSkewness(p), kurt=calcKurtosis(p), jb=jarqueBera(p), std=sampleStd(p), env=analyzeMarketEnv(m,d.trades);
+    html+=`<tr><td style="color:${COLORS[i%10]}">${d.name}</td><td>${m.n}</td><td>${pct(m.winRate)}</td><td class="${m.avgProfit>=0?'positive':'negative'}">${fmt(m.avgProfit)}</td><td>${fmt(std)}</td><td>${skew.toFixed(2)}</td><td>${kurt.toFixed(2)}</td><td>${m.profitFactor===Infinity?'∞':m.profitFactor.toFixed(2)}</td><td>${m.payoffRatio===Infinity?'∞':m.payoffRatio.toFixed(2)}</td><td>${env.dir}</td><td style="font-size:11px">${env.style}</td><td class="${jb.p<0.05?'negative':'positive'}">${jb.p<0.05?'非常態':'常態'}</td></tr>`;
+  });
+  html+=`</tbody></table></div>`;
+
+  container.innerHTML=html;
+
+  // Draw charts
+  distData.forEach((d,i)=>drawDistAdv('distAdv_'+i, d.metrics.profits, COLORS[i%10]));
+  if(distData.length>=2) drawKDECompare('kdeCompare');
+  drawBoxCompare('boxCompare');
+  distData.forEach((d,i)=>drawQQChart('qqChart_'+i, d.metrics.profits, COLORS[i%10]));
+}
+
+// ----- Distribution histogram + normal + KDE -----
+function drawDistAdv(id, profits, color) {
+  destroyChart(id);
+  const n=profits.length, mean=profits.reduce((a,b)=>a+b,0)/n;
+  const std=sampleStd(profits);
+  const sorted=[...profits].sort((a,b)=>a-b);
+  const median=sorted[Math.floor(n/2)];
+  const pMin=Math.min(...profits), pMax=Math.max(...profits);
+  const nBins=Math.min(50, Math.max(15, Math.floor(n/8)));
+  const binSize=(pMax-pMin)/nBins||1;
+  const bins=new Array(nBins).fill(0);
+  for(const p of profits){let idx=Math.floor((p-pMin)/binSize);if(idx>=nBins)idx=nBins-1;bins[idx]++;}
+  const totalArea=n*binSize;
+  const barData=[], barColors=[];
+  for(let i=0;i<nBins;i++){const x=pMin+(i+0.5)*binSize;barData.push({x,y:bins[i]/totalArea});barColors.push(x>=0?color+'99':'rgba(255,71,87,0.5)');}
+  const curveN=120, xLo=pMin-std*0.5, xHi=pMax+std*0.5;
+  const kde=gaussianKDE(profits), normalData=[], kdeData=[];
+  for(let i=0;i<curveN;i++){const x=xLo+(xHi-xLo)*i/(curveN-1);normalData.push({x,y:normalPDF(x,mean,std)});kdeData.push({x,y:kde(x)});}
+
+  charts[id]=new Chart(document.getElementById(id),{
+    data:{datasets:[
+      {type:'bar',data:barData,backgroundColor:barColors,borderColor:'rgba(255,255,255,0.2)',borderWidth:0.5,barThickness:'flex',order:3,label:'直方圖'},
+      {type:'line',label:'常態 N('+fmt(mean)+', '+fmt(std)+'²)',data:normalData,borderColor:'#ff4757',borderWidth:2.5,pointRadius:0,tension:0.3,fill:false,order:1},
+      {type:'line',label:'實際分配 (KDE)',data:kdeData,borderColor:'#4a90d9',borderWidth:2,borderDash:[6,3],pointRadius:0,tension:0.3,fill:false,order:2}
+    ]},
+    options:{responsive:true,
+      scales:{
+        x:{type:'linear',title:{display:true,text:'單筆損益 (點)',color:'#888',font:{size:11}},ticks:{color:'#555',maxTicksLimit:8,callback:v=>fmt(v)},grid:{color:'#1f2235'}},
+        y:{title:{display:true,text:'機率密度',color:'#888',font:{size:11}},ticks:{color:'#888'},grid:{color:'#1f2235'}}
+      },
+      plugins:{
+        legend:{position:'top',labels:{color:'#888',font:{size:10},filter:item=>item.text!=='直方圖'}},
+        annotation:{annotations:{
+          s2:{type:'box',xMin:mean-2*std,xMax:mean+2*std,backgroundColor:color+'08',borderWidth:0},
+          s1:{type:'box',xMin:mean-std,xMax:mean+std,backgroundColor:color+'14',borderWidth:0},
+          ml:{type:'line',xMin:mean,xMax:mean,borderColor:'#ff4757',borderWidth:1.5,borderDash:[4,4],label:{display:true,content:'均值',position:'start',color:'#ff4757',font:{size:9}}},
+          mdl:{type:'line',xMin:median,xMax:median,borderColor:'#00d4aa',borderWidth:1.5,borderDash:[4,4],label:{display:true,content:'中位數',position:'start',color:'#00d4aa',font:{size:9}}},
+          zl:{type:'line',xMin:0,xMax:0,borderColor:'rgba(255,255,255,0.25)',borderWidth:1}
+        }}
+      }
+    }
+  });
+}
+
+// ----- KDE overlay comparison -----
+function drawKDECompare(id) {
+  destroyChart(id);
+  const datasets=distData.map((d,i)=>{
+    const p=d.metrics.profits, mean=d.metrics.avgProfit, std=sampleStd(p);
+    const kde=gaussianKDE(p);
+    const lo=Math.min(...p)-2000, hi=Math.max(...p)+2000;
+    const pts=[]; for(let j=0;j<200;j++){const x=lo+(hi-lo)*j/199;pts.push({x,y:kde(x)});}
+    return{label:d.name+' (μ='+fmt(mean)+', σ='+fmt(std)+')',data:pts,borderColor:COLORS[i%10],borderWidth:2.5,pointRadius:0,tension:0.3,fill:false};
+  });
+  charts[id]=new Chart(document.getElementById(id),{type:'line',data:{datasets},
+    options:{responsive:true,
+      scales:{
+        x:{type:'linear',title:{display:true,text:'單筆損益 (點)',color:'#888'},ticks:{color:'#555',callback:v=>fmt(v)},grid:{color:'#1f2235'}},
+        y:{title:{display:true,text:'機率密度',color:'#888'},ticks:{color:'#888'},grid:{color:'#1f2235'}}
+      },
+      plugins:{legend:{position:'top',labels:{color:'#888',font:{size:11}}},
+        annotation:{annotations:{zl:{type:'line',xMin:0,xMax:0,borderColor:'rgba(255,255,255,0.3)',borderWidth:1,borderDash:[4,4]}}}
+      }
+    }
+  });
+}
+
+// ----- Box plot comparison -----
+function drawBoxCompare(id) {
+  destroyChart(id);
+  const stats=distData.map((d,i)=>{
+    const s=[...d.metrics.profits].sort((a,b)=>a-b), n=s.length;
+    const q1=s[Math.floor(n*0.25)], med=s[Math.floor(n*0.5)], q3=s[Math.floor(n*0.75)];
+    const iqr=q3-q1;
+    const wLo=s.find(v=>v>=q1-1.5*iqr)||s[0];
+    const wHi=[...s].reverse().find(v=>v<=q3+1.5*iqr)||s[n-1];
+    return{q1,med,q3,wLo,wHi,mean:d.metrics.avgProfit};
+  });
+  const labels=distData.map(d=>d.name);
+  const annotations={zl:{type:'line',yMin:0,yMax:0,borderColor:'rgba(255,255,255,0.3)',borderWidth:1,borderDash:[4,4]}};
+  stats.forEach((b,i)=>{
+    annotations['med'+i]={type:'line',yMin:b.med,yMax:b.med,xMin:i-0.22,xMax:i+0.22,borderColor:'#ffffff',borderWidth:2.5};
+    annotations['mean'+i]={type:'point',xValue:i,yValue:b.mean,radius:5,backgroundColor:'#ff4757',borderColor:'#ff4757'};
+  });
+  charts[id]=new Chart(document.getElementById(id),{type:'bar',
+    data:{labels,datasets:[
+      {label:'箱體 (Q1-Q3)',data:stats.map(b=>[b.q1,b.q3]),backgroundColor:distData.map((_,i)=>COLORS[i%10]+'66'),borderColor:distData.map((_,i)=>COLORS[i%10]),borderWidth:2,barPercentage:0.5},
+      {label:'下鬚線',data:stats.map(b=>[b.wLo,b.q1]),backgroundColor:'rgba(255,255,255,0.15)',borderColor:distData.map((_,i)=>COLORS[i%10]+'88'),borderWidth:1,barPercentage:0.04},
+      {label:'上鬚線',data:stats.map(b=>[b.q3,b.wHi]),backgroundColor:'rgba(255,255,255,0.15)',borderColor:distData.map((_,i)=>COLORS[i%10]+'88'),borderWidth:1,barPercentage:0.04}
+    ]},
+    options:{responsive:true,
+      scales:{
+        x:{ticks:{color:'#888',font:{size:11}},grid:{display:false}},
+        y:{title:{display:true,text:'單筆損益 (點)',color:'#888'},ticks:{color:'#888',callback:v=>fmt(v)},grid:{color:'#1f2235'}}
+      },
+      plugins:{legend:{position:'top',labels:{color:'#888',font:{size:10}}},annotation:{annotations}}
+    }
+  });
+}
+
+// ----- Q-Q Plot -----
+function drawQQChart(id, profits, color) {
+  destroyChart(id);
+  const sorted=[...profits].sort((a,b)=>a-b), n=sorted.length;
+  const theoretical=[];for(let i=0;i<n;i++) theoretical.push(normalQuantile((i+0.5)/n));
+  const data=theoretical.map((t,i)=>({x:t,y:sorted[i]}));
+  const mx=theoretical.reduce((a,b)=>a+b,0)/n, my=sorted.reduce((a,b)=>a+b,0)/n;
+  let ssxy=0,ssxx=0;for(let i=0;i<n;i++){ssxy+=(theoretical[i]-mx)*(sorted[i]-my);ssxx+=(theoretical[i]-mx)**2;}
+  const slope=ssxx===0?1:ssxy/ssxx, intercept=my-slope*mx;
+  const xMin=theoretical[0],xMax=theoretical[n-1];
+  const refLine=[{x:xMin,y:slope*xMin+intercept},{x:xMax,y:slope*xMax+intercept}];
+  const jb=jarqueBera(profits);
+  charts[id]=new Chart(document.getElementById(id),{type:'scatter',
+    data:{datasets:[
+      {label:'觀察值',data,backgroundColor:color+'88',borderColor:color,pointRadius:2.5,order:2},
+      {label:'參考線',data:refLine,type:'line',borderColor:'#ff4757',borderWidth:2,pointRadius:0,fill:false,order:1}
+    ]},
+    options:{responsive:true,
+      scales:{
+        x:{type:'linear',title:{display:true,text:'理論分位數',color:'#888',font:{size:11}},ticks:{color:'#555'},grid:{color:'#1f2235'}},
+        y:{title:{display:true,text:'觀察值',color:'#888',font:{size:11}},ticks:{color:'#888',callback:v=>fmt(v)},grid:{color:'#1f2235'}}
+      },
+      plugins:{legend:{display:false},
+        annotation:{annotations:{jbLabel:{type:'label',xValue:xMin+0.3,yValue:sorted[n-1]*0.85,
+          content:['Jarque-Bera','JB='+jb.stat.toFixed(1),'p='+(jb.p<0.0001?'<0.0001':jb.p.toFixed(4)),jb.p<0.05?'→ 非常態':'→ 常態'],
+          color:'#e0e0e0',font:{size:10},backgroundColor:'rgba(20,22,39,0.85)',borderColor:'var(--border)',borderWidth:1,padding:6}}}
+      }
+    }
+  });
 }
 </script>
 </body>
